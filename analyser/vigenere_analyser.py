@@ -2,22 +2,33 @@ import string
 from collections import Counter
 
 class VigenereAnalyser:
+    """
+    Vigenere cipher cryptanalysis tool.
+    Performs key length estimation via Index of Coincidence (IC)
+    and key recovery using frequency analysis with chi-squared scoring.
+    """
+
     def __init__(self, ciphertext: str, language: str = "pt"):
         """
-        Initialize the analyser with the ciphertext and the target language.
+        Initialize the analyser.
 
         Args:
-            ciphertext (str): Encrypted text (only alphabetic characters will be considered).
-            language (str): 'pt' for Portuguese or 'en' for English (affects frequency analysis).
+            ciphertext (str): The ciphertext to be analyzed.
+                              Only alphabetic characters are considered.
+            language (str): Target language for frequency analysis.
+                            Options: "pt" (Portuguese) or "en" (English).
         """
-        # Keep only uppercase alphabetic characters from ciphertext
         self.ciphertext = ''.join([c for c in ciphertext.upper() if c.isalpha()])
         self.alphabet = string.ascii_uppercase
         self.mod = len(self.alphabet)
 
-        # Expected letter frequencies (normalized) for Portuguese and English
+        # Metrics
+        self.key_length_scores = {}   # IC values per key length
+        self.column_metrics = []      # Chi-squared scores per column
+        self.recovered_key = ""       # Final recovered key
+
+        # Expected frequencies for Portuguese or English
         if language == "pt":
-            # Source: Portuguese letter frequencies (Wikipedia)
             self.expected_freqs = {
                 'A': 0.1463, 'B': 0.0104, 'C': 0.0388, 'D': 0.0499,
                 'E': 0.1257, 'F': 0.0102, 'G': 0.0130, 'H': 0.0078,
@@ -28,7 +39,6 @@ class VigenereAnalyser:
                 'Y': 0.0001, 'Z': 0.0047,
             }
         else:
-            # Source: English letter frequencies (Wikipedia)
             self.expected_freqs = {
                 'A': 0.0817, 'B': 0.0149, 'C': 0.0278, 'D': 0.0425,
                 'E': 0.1270, 'F': 0.0223, 'G': 0.0202, 'H': 0.0609,
@@ -39,29 +49,23 @@ class VigenereAnalyser:
                 'Y': 0.0197, 'Z': 0.0007,
             }
 
-    # -------------------------------------------------------------------
-    # Step 1: Estimate key length using Index of Coincidence (IC)
-    # -------------------------------------------------------------------
     def _index_of_coincidence(self, text: str) -> float:
         """
-        Calculate the Index of Coincidence (IC) for a given text.
-        IC is higher (~0.065 for natural language) than for random text (~0.038).
+        Compute the Index of Coincidence (IC) for a given text.
 
         Args:
-            text (str): Text to compute IC for.
+            text (str): Substring of ciphertext.
 
         Returns:
-            float: Index of Coincidence.
+            float: IC value.
         """
         N = len(text)
         freqs = Counter(text)
-        ic = sum(f * (f - 1) for f in freqs.values()) / (N * (N - 1)) if N > 1 else 0
-        return ic
+        return sum(f * (f - 1) for f in freqs.values()) / (N * (N - 1)) if N > 1 else 0
 
     def estimate_key_length(self, max_len: int = 20) -> int:
         """
-        Estimate the most probable key length by calculating the IC
-        for different candidate lengths.
+        Estimate probable key length based on average IC across columns.
 
         Args:
             max_len (int): Maximum key length to test.
@@ -70,92 +74,106 @@ class VigenereAnalyser:
             int: Estimated key length.
         """
         results = {}
-        # For each possible key length, split ciphertext into columns
         for key_len in range(1, max_len + 1):
-            ic_values = []
-            for i in range(key_len):
-                column = self.ciphertext[i::key_len]  # every i-th letter
-                ic_values.append(self._index_of_coincidence(column))
-            # Average IC for this key length
+            ic_values = [self._index_of_coincidence(self.ciphertext[i::key_len]) for i in range(key_len)]
             results[key_len] = sum(ic_values) / len(ic_values)
 
-        # Save results for reporting
         self.key_length_scores = results
+        return max(results, key=results.get)
 
-        # Choose the key length with the highest average IC
-        best_len = max(results, key=results.get)
-        return best_len
-
-    # -------------------------------------------------------------------
-    # Step 2: Recover key using frequency analysis + chi-squared test
-    # -------------------------------------------------------------------
-    def _chi_squared(self, observed_freqs):
+    def _chi_squared(self, observed_freqs: Counter) -> float:
         """
         Compute chi-squared statistic between observed and expected frequencies.
 
         Args:
-            observed_freqs (Counter): Letter frequency distribution from text.
+            observed_freqs (Counter): Frequency distribution of shifted text.
 
         Returns:
-            float: Chi-squared score (lower = better fit).
+            float: Chi-squared score (lower is better).
         """
         chi = 0
         total = sum(observed_freqs.values())
+
         for letter in self.alphabet:
             expected = self.expected_freqs.get(letter, 0) * total
             observed = observed_freqs.get(letter, 0)
-            chi += (observed - expected) ** 2 / expected if expected > 0 else 0
+
+            if expected > 0:
+                chi += (observed - expected) ** 2 / expected
+
         return chi
 
     def recover_key(self, key_len: int) -> str:
         """
-        Recover the key by analyzing each column separately.
-        Each column corresponds to Caesar cipher with unknown shift.
+        Recover the encryption key using frequency analysis.
 
         Args:
             key_len (int): Estimated key length.
 
         Returns:
-            str: Recovered key (uppercase).
+            str: Recovered key (reduced to smallest cycle if repetitive).
         """
         key = []
-        # For each position in the key
+        self.column_metrics = []
+
         for i in range(key_len):
             column = self.ciphertext[i::key_len]
-            best_shift = None
-            best_score = float('inf')
+            best_shift, best_score = None, float("inf")
+            scores = {}
 
-            # Try all possible shifts (A-Z)
             for shift in range(self.mod):
                 shifted_text = ''.join(
                     self.alphabet[(ord(c) - ord('A') - shift) % self.mod] for c in column
                 )
-                freqs = Counter(shifted_text)
-                score = self._chi_squared(freqs)
+                score = self._chi_squared(Counter(shifted_text))
+                scores[shift] = score
 
                 if score < best_score:
-                    best_score = score
-                    best_shift = shift
+                    best_score, best_shift = score, shift
 
-            # The best shift corresponds to the key letter
             key.append(self.alphabet[best_shift])
-        return ''.join(key)
+            self.column_metrics.append({
+                "position": i,
+                "best_shift": best_shift,
+                "best_score": best_score,
+                "scores": scores
+            })
 
-    # -------------------------------------------------------------------
-    # Step 3: Full attack (estimate key length + recover key)
-    # -------------------------------------------------------------------
-    def analyse(self, max_len: int = 20) -> str:
+        raw_key = ''.join(key)
+        reduced_key = self._reduce_cyclic_key(raw_key)
+        self.recovered_key = reduced_key
+        return reduced_key
+
+    def _reduce_cyclic_key(self, key: str) -> str:
         """
-        Perform the full attack:
-        - Estimate key length
-        - Recover the key
+        Reduce a repeated key pattern to its smallest cycle.
 
         Args:
-            max_len (int): Maximum key length to test.
+            key (str): Raw recovered key.
+
+        Returns:
+            str: Reduced key if repetition detected, else original.
+        """
+        for i in range(1, len(key)):
+            cycle = key[:i]
+
+            if cycle * (len(key) // len(cycle)) == key:
+                return cycle
+            
+        return key
+
+    def analyse(self, max_len: int = 20) -> str:
+        """
+        Execute full cryptanalysis pipeline:
+        1. Estimate key length via IC.
+        2. Recover key using chi-squared analysis.
+        3. Reduce key if cyclic repetition exists.
+
+        Args:
+            max_len (int): Maximum key length to consider.
 
         Returns:
             str: Recovered key.
         """
         est_len = self.estimate_key_length(max_len)
-        key = self.recover_key(est_len)
-        return key
+        return self.recover_key(est_len)

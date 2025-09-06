@@ -10,3 +10,6 @@ venv/
 
 # Test/cache files
 .pytest_cache/
+
+# Results
+results/
